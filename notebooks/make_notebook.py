@@ -7,8 +7,19 @@ GITHUB_USER = "agaddas"
 REPO = "pet-breed-classifier"
 
 
+def as_source(text):
+    """Split into the list of lines nbformat expects.
+
+    Every line except the last keeps its trailing newline: Jupyter joins the
+    list with no separator, so stripping the newlines collapses the whole cell
+    onto one line.
+    """
+    lines = text.split("\n")
+    return [line + "\n" for line in lines[:-1]] + [lines[-1]]
+
+
 def md(text):
-    return {"cell_type": "markdown", "metadata": {}, "source": text.strip().split("\n")}
+    return {"cell_type": "markdown", "metadata": {}, "source": as_source(text.strip())}
 
 
 def code(text):
@@ -17,7 +28,7 @@ def code(text):
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": text.strip("\n").split("\n"),
+        "source": as_source(text.strip("\n")),
     }
 
 
