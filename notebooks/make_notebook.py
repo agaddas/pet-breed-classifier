@@ -1,0 +1,249 @@
+"""Generates notebooks/train_colab.ipynb. Run this if you edit the notebook content here."""
+
+import json
+from pathlib import Path
+
+GITHUB_USER = "agaddas"
+REPO = "pet-breed-classifier"
+
+
+def md(text):
+    return {"cell_type": "markdown", "metadata": {}, "source": text.strip().split("\n")}
+
+
+def code(text):
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": text.strip("\n").split("\n"),
+    }
+
+
+cells = [
+    md(f"""
+# Pet breed classification — training notebook
+
+Fine-grained classification of the 37 breeds in the **Oxford-IIIT Pet** dataset,
+comparing a CNN trained from scratch against a fine-tuned ImageNet backbone.
+
+**Before you run anything:** `Runtime` → `Change runtime type` → **T4 GPU**.
+On CPU this notebook takes hours; on a T4 it takes about 20 minutes end to end.
+
+Repository: https://github.com/{GITHUB_USER}/{REPO}
+"""),
+    md("## 1. Environment"),
+    code("""
+!nvidia-smi -L || echo "No GPU detected — set Runtime > Change runtime type > T4 GPU"
+import torch
+print("torch", torch.__version__, "| CUDA available:", torch.cuda.is_available())
+"""),
+    code(f"""
+# Clone the repository and install what Colab does not already ship.
+import os
+if not os.path.exists("{REPO}"):
+    !git clone --quiet https://github.com/{GITHUB_USER}/{REPO}.git
+%cd {REPO}
+!pip install --quiet -r requirements.txt
+"""),
+    md("""
+## 2. Data
+
+`torchvision` downloads the Oxford-IIIT Pet archive (~800 MB) on first use and
+caches it under `data/`. 7,349 images, 37 breeds, roughly 200 photos per class.
+
+The official `trainval` split is cut 80/20 into train and validation. The
+official `test` split is touched exactly once, at the end, for the numbers that
+go in the README.
+"""),
+    code("""
+from src.data import DataConfig, build_dataloaders, denormalize
+from src.utils import pretty_class_name
+import matplotlib.pyplot as plt
+
+cfg = DataConfig(batch_size=32, num_workers=2)
+train_loader, val_loader, test_loader, classes = build_dataloaders(cfg)
+
+print(f"{len(train_loader.dataset)} train | {len(val_loader.dataset)} val | "
+      f"{len(test_loader.dataset)} test | {len(classes)} classes")
+
+images, labels = next(iter(train_loader))
+fig, axes = plt.subplots(2, 6, figsize=(16, 6))
+for ax, img, label in zip(axes.ravel(), images, labels):
+    ax.imshow(denormalize(img).permute(1, 2, 0).numpy())
+    ax.set_title(pretty_class_name(classes[label]), fontsize=8)
+    ax.axis("off")
+plt.suptitle("Training batch (after augmentation)")
+plt.tight_layout()
+plt.show()
+"""),
+    md("""
+## 3. Baseline — a CNN trained from scratch
+
+Four convolutional blocks, batch norm, ~1.2 M parameters. No pretrained
+weights. This is the control: it establishes what the architecture alone
+achieves on 5,900 images, so the transfer-learning gain later is measured
+against something real instead of against zero.
+
+Expect it to plateau in the 30–45 % range and to overfit visibly — with ~160
+training images per class, there is not enough signal to learn general visual
+features from scratch.
+"""),
+    code("""
+from src.train import train, build_parser
+
+baseline_args = build_parser().parse_args([
+    "--model", "simple_cnn",
+    "--epochs", "30",
+    "--lr", "1e-3",
+    "--freeze-epochs", "0",
+    "--run-name", "baseline_cnn",
+])
+baseline = train(baseline_args)
+"""),
+    md("""
+## 4. Transfer learning — ResNet-34, fine-tuned in two stages
+
+Same data, same augmentation, same schedule length. The only change is the
+starting point: weights pretrained on ImageNet.
+
+Two stages, and the order matters:
+
+1. **Frozen backbone (3 epochs).** Only the new 37-way head trains. The head
+   starts random, so its early gradients are large and noisy — letting them
+   reach the pretrained features straight away would destroy exactly what we
+   came for.
+2. **Full fine-tuning (9 epochs), learning rate ÷ 10.** Now that the head is
+   sane, the whole network adapts to pet breeds at a rate small enough not to
+   wash out the ImageNet features.
+"""),
+    code("""
+transfer_args = build_parser().parse_args([
+    "--model", "resnet34",
+    "--epochs", "12",
+    "--lr", "1e-3",
+    "--freeze-epochs", "3",
+    "--run-name", "resnet34",
+])
+transfer = train(transfer_args)
+"""),
+    code("""
+print(f"{'model':<16}{'best val acc':>14}{'epochs':>9}{'minutes':>10}")
+for run in (baseline, transfer):
+    print(f"{run['model']:<16}{run['best_val_acc']:>13.2%}{run['epochs']:>9}{run['minutes']:>10.1f}")
+
+gain = transfer["best_val_acc"] - baseline["best_val_acc"]
+print(f"\\nTransfer learning is worth {gain:+.1%} accuracy here.")
+"""),
+    md("""
+## 5. Evaluation on the held-out test split
+
+Top-1 and top-5 accuracy, macro F1 (which weights every breed equally, so a
+model that is good only on the well-represented classes cannot hide), a
+confusion matrix, and the mistakes the model was most confident about.
+"""),
+    code("""
+!python -m src.evaluate --checkpoint runs/baseline_cnn/best.pt --out reports/baseline_cnn
+!python -m src.evaluate --checkpoint runs/resnet34/best.pt     --out reports/resnet34
+"""),
+    code("""
+from IPython.display import Image as Show
+Show("reports/resnet34/confusion_matrix.png")
+"""),
+    code("""
+Show("reports/resnet34/confident_mistakes.png")
+"""),
+    md("""
+## 6. Grad-CAM — is it looking at the animal?
+
+Accuracy alone does not tell you *why* a model is right. Grad-CAM projects the
+gradient of the predicted class back onto the last convolutional feature map,
+which shows which pixels moved the decision.
+
+What to look for: heat centred on the head and coat of the animal. Heat sitting
+on grass, a sofa or a collar means the model has latched onto a spurious
+correlation in the dataset — right answer, wrong reason, and it will not
+survive contact with new photographs.
+"""),
+    code("""
+import torch
+from src.gradcam import GradCAM, find_target_layer, overlay
+from src.evaluate import load_checkpoint
+from src.utils import get_device
+
+device = get_device()
+model, classes, ckpt = load_checkpoint("runs/resnet34/best.pt", device)
+
+images, labels = next(iter(test_loader))
+fig, axes = plt.subplots(2, 4, figsize=(15, 7.5))
+
+with GradCAM(model, find_target_layer(model)) as cam_fn:
+    for col in range(4):
+        img = images[col].to(device)
+        cam, pred_idx, probs = cam_fn(img.clone())
+        axes[0, col].imshow(denormalize(img.cpu()).permute(1, 2, 0).numpy())
+        axes[0, col].set_title(f"true: {pretty_class_name(classes[labels[col]])}", fontsize=9)
+        axes[1, col].imshow(overlay(img, cam))
+        ok = "OK" if pred_idx == labels[col].item() else "WRONG"
+        axes[1, col].set_title(
+            f"{ok} — {pretty_class_name(classes[pred_idx])} ({probs[pred_idx]:.0%})",
+            fontsize=9,
+        )
+        axes[0, col].axis("off")
+        axes[1, col].axis("off")
+
+plt.suptitle("Grad-CAM on test images")
+plt.tight_layout()
+plt.savefig("reports/gradcam_grid.png", dpi=140, bbox_inches="tight")
+plt.show()
+"""),
+    md("""
+## 7. Save the artefacts
+
+Download the figures, metrics and the trained weights, then commit the figures
+and `metrics.json` back to the repository so the README numbers are backed by
+files anyone can check.
+
+The `.pt` checkpoints are too large for git — keep them out (`.gitignore`
+already excludes `runs/`) and attach them to a GitHub Release if you want them
+published.
+"""),
+    code("""
+!zip -qr artifacts.zip reports runs/*/history.json runs/*/curves.png
+from google.colab import files
+files.download("artifacts.zip")
+"""),
+    md("""
+---
+
+### Where this could go next
+
+- **Class-balanced sampling.** The dataset is close to balanced, but the macro
+  F1 / top-1 gap shows which breeds carry the errors.
+- **A stronger backbone.** ConvNeXt-Tiny or EfficientNet-B0 at the same
+  parameter budget, to separate "pretraining helps" from "this architecture
+  helps".
+- **Test-time augmentation.** Averaging predictions over a horizontal flip is
+  usually worth a fraction of a point for free.
+- **Calibration.** Softmax scores are not probabilities. Temperature scaling on
+  the validation split would make the confidence shown in the demo mean
+  something.
+"""),
+]
+
+notebook = {
+    "cells": cells,
+    "metadata": {
+        "accelerator": "GPU",
+        "colab": {"provenance": [], "gpuType": "T4", "toc_visible": True},
+        "kernelspec": {"display_name": "Python 3", "name": "python3"},
+        "language_info": {"name": "python"},
+    },
+    "nbformat": 4,
+    "nbformat_minor": 0,
+}
+
+out = Path(__file__).with_name("train_colab.ipynb")
+out.write_text(json.dumps(notebook, indent=1, ensure_ascii=False))
+print(f"Wrote {out} ({len(cells)} cells)")

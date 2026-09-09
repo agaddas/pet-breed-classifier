@@ -1,0 +1,18 @@
+# Data and model weights are too large for git.
+data/
+runs/
+*.pt
+*.pth
+artifacts.zip
+
+# Keep the figures and metrics under reports/ — they back the README numbers.
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+.DS_Store
+.idea/
+.vscode/
