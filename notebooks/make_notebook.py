@@ -97,9 +97,10 @@ weights. This is the control: it establishes what the architecture alone
 achieves on 5,900 images, so the transfer-learning gain later is measured
 against something real instead of against zero.
 
-Expect it to plateau in the 30–45 % range and to overfit visibly — with ~160
-training images per class, there is not enough signal to learn general visual
-features from scratch.
+Expect it to plateau in the 30–45 % range, with the training and validation
+curves sitting on top of each other. That is **underfitting**, not overfitting:
+with ~160 images per class it cannot learn general visual features from a random
+initialisation at all, so it never even fits the training set.
 """),
     code("""
 from src.train import train, build_parser
@@ -186,17 +187,23 @@ from src.utils import get_device
 device = get_device()
 model, classes, ckpt = load_checkpoint("runs/resnet34/best.pt", device)
 
-images, labels = next(iter(test_loader))
+# The test split is ordered by class, so take a spread of random indices
+# rather than the first batch — otherwise every panel shows the same breed.
+import random
+random.seed(7)
+picks = random.sample(range(len(test_loader.dataset)), 4)
+
 fig, axes = plt.subplots(2, 4, figsize=(15, 7.5))
 
 with GradCAM(model, find_target_layer(model)) as cam_fn:
-    for col in range(4):
-        img = images[col].to(device)
+    for col, idx in enumerate(picks):
+        img, label = test_loader.dataset[idx]
+        img = img.to(device)
         cam, pred_idx, probs = cam_fn(img.clone())
         axes[0, col].imshow(denormalize(img.cpu()).permute(1, 2, 0).numpy())
-        axes[0, col].set_title(f"true: {pretty_class_name(classes[labels[col]])}", fontsize=9)
+        axes[0, col].set_title(f"true: {pretty_class_name(classes[label])}", fontsize=9)
         axes[1, col].imshow(overlay(img, cam))
-        ok = "OK" if pred_idx == labels[col].item() else "WRONG"
+        ok = "OK" if pred_idx == label else "WRONG"
         axes[1, col].set_title(
             f"{ok} — {pretty_class_name(classes[pred_idx])} ({probs[pred_idx]:.0%})",
             fontsize=9,

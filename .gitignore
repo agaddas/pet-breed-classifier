@@ -5,7 +5,7 @@ runs/
 *.pth
 artifacts.zip
 
-# Keep the figures and metrics under reports/ — they back the README numbers.
+# reports/ IS tracked — the figures and metrics there back the README numbers.
 
 __pycache__/
 *.py[cod]
